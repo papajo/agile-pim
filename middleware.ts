@@ -2,117 +2,111 @@ import { NextResponse } from "next/server"
 import type { NextRequest } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 
+// Function to create Supabase client (avoids repetition)
+const getSupabaseMiddlewareClient = (req: NextRequest) => {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
+
+  if (!supabaseUrl || !supabaseKey) {
+    console.error("Supabase environment variables are missing in middleware")
+    return null // Indicate failure
+  }
+
+  const cookies = req.cookies.getAll()
+  const cookieHeader = cookies.map(({ name, value }) => `${name}=${value}`).join("; ")
+
+  return createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+    global: {
+      headers: {
+        cookie: cookieHeader,
+      },
+    },
+  })
+}
+
 export async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl
+  const res = NextResponse.next() // Start with a pass-through response
+
   try {
-    // Skip middleware for public routes and static assets
-    const publicRoutes = ["/", "/sign-in", "/sign-up", "/auth/callback", "/_next", "/api/auth", "/favicon.ico"]
-    const isPublicRoute = publicRoutes.some(
-      (route) => req.nextUrl.pathname === route || req.nextUrl.pathname.startsWith(route),
-    )
-    const isStaticAsset =
-      req.nextUrl.pathname.includes("/_next/") ||
-      req.nextUrl.pathname.includes("/images/") ||
-      req.nextUrl.pathname.includes("/fonts/") ||
-      req.nextUrl.pathname.includes("/favicon.ico")
+    // Define public routes and patterns for static assets/API
+    const publicRoutes = ["/", "/sign-in", "/sign-up", "/auth/callback"]
+    const isApiAuthRoute = pathname.startsWith("/api/auth")
+    const isStaticAsset = /\.(.*)$/.test(pathname) || pathname.startsWith("/_next")
 
-    if (isPublicRoute || isStaticAsset) {
-      return NextResponse.next()
+    // Skip middleware for public routes, static assets, and specific API routes
+    if (publicRoutes.includes(pathname) || isApiAuthRoute || isStaticAsset) {
+      return res // Allow request
     }
 
-    // Debug logging
-    console.log(`Middleware processing: ${req.nextUrl.pathname}`)
+    console.log(`Middleware processing protected route: ${pathname}`)
 
-    // Create a response object
-    const res = NextResponse.next()
+    const supabase = getSupabaseMiddlewareClient(req)
 
-    // Get environment variables
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
-    const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
-
-    if (!supabaseUrl || !supabaseKey) {
-      console.error("Supabase environment variables are missing in middleware")
-      return res
+    if (!supabase) {
+      // If Supabase client failed to initialize, block access to protected routes
+      console.error("Middleware: Supabase client init failed. Blocking access.")
+      const errorUrl = new URL("/sign-in", req.url) // Redirect to sign-in as a fallback
+      errorUrl.searchParams.set("error", "Configuration error")
+      return NextResponse.redirect(errorUrl)
     }
 
-    // Get the cookies from the request
-    const cookies = req.cookies.getAll()
-    const cookieHeader = cookies.map(({ name, value }) => `${name}=${value}`).join("; ")
-
-    // Create a Supabase client
-    const supabase = createClient(supabaseUrl, supabaseKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
-      global: {
-        headers: {
-          cookie: cookieHeader,
-        },
-      },
-    })
-
-    // Check if the user is authenticated
+    // Check user session
     const { data, error } = await supabase.auth.getSession()
 
-    // Log for debugging
-    console.log(
-      `Middleware auth check for: ${req.nextUrl.pathname}`,
-      `Session: ${data.session ? "Found" : "Not found"}`,
-      error ? `Error: ${error.message}` : "",
-    )
+    if (error) {
+      console.error(`Middleware auth error for ${pathname}:`, error.message)
+      // If there's an error checking the session, redirect to sign-in with an error
+      const errorUrl = new URL("/sign-in", req.url)
+      errorUrl.searchParams.set("error", "Authentication check failed")
+      errorUrl.searchParams.set("redirect", pathname)
+      return NextResponse.redirect(errorUrl)
+    }
 
-    // If there's a session, set the auth cookie in the response
+    // Log session status
+    console.log(`Middleware auth check for: ${pathname}`, `Session: ${data.session ? "Found" : "Not found"}`)
+
+    // If session exists, allow the request
     if (data.session) {
-      // Copy all cookies from the request to the response
-      for (const { name, value, ...options } of req.cookies.getAll()) {
-        res.cookies.set(name, value, options)
-      }
+      // Note: Cookies are automatically passed in Next.js >= 13.4 middleware responses
       return res
     }
 
-    // Special case for /projects/new - ensure it's properly handled
-    if (req.nextUrl.pathname === "/projects/new") {
-      console.log("Handling /projects/new route specifically")
+    // --- No session found ---
+    // Redirect to sign-in page, preserving the intended destination
+    console.log(`Middleware: No session found for ${pathname}. Redirecting to sign-in.`)
+    const redirectUrl = new URL("/sign-in", req.url)
+    redirectUrl.searchParams.set("redirect", pathname)
+    return NextResponse.redirect(redirectUrl)
 
-      // If user is authenticated, allow access
-      if (data.session) {
-        return res
-      }
-
-      // If not authenticated, redirect to sign in
-      const redirectUrl = new URL("/sign-in", req.url)
-      redirectUrl.searchParams.set("redirect", "/projects/new")
-      return NextResponse.redirect(redirectUrl)
-    }
-
-    // If accessing a protected route without authentication, redirect to sign in
-    if (req.nextUrl.pathname.startsWith("/projects") || req.nextUrl.pathname.startsWith("/dashboard")) {
-      const redirectUrl = new URL("/sign-in", req.url)
-      redirectUrl.searchParams.set("redirect", req.nextUrl.pathname)
-      return NextResponse.redirect(redirectUrl)
-    }
-
-    // For other routes, just continue
-    return res
   } catch (error) {
-    console.error("Middleware error:", error)
-
-    // In case of error, allow the request to continue
-    // This prevents blocking access to the application due to auth errors
-    return NextResponse.next()
+    console.error("Unexpected Middleware error:", error)
+    // --- Improved Catch Block ---
+    // Redirect to a generic error page or sign-in page in case of unexpected errors
+    const errorUrl = new URL("/sign-in", req.url)
+    errorUrl.searchParams.set("error", "An unexpected error occurred during authentication")
+    errorUrl.searchParams.set("redirect", pathname)
+    return NextResponse.redirect(errorUrl)
+    // --- End Improvement ---
   }
 }
 
 export const config = {
   matcher: [
     /*
-     * Match all request paths except:
+     * Match all request paths except for the ones starting with:
+     * - api/auth (authentication routes)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
-     * - public folder
+     * - public folder assets (assuming they are served directly or via /public path)
+     * Matcher needs to be efficient. Avoid overly complex regex if possible.
      */
-    "/((?!_next/static|_next/image|favicon.ico|public).*)",
+    "/((?!api/auth|_next/static|_next/image|favicon.ico|public).*)",
   ],
 }

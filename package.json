@@ -58,11 +58,11 @@
     "tailwindcss-animate": "^1.0.7",
     "vaul": "^0.9.6",
     "zod": "^3.24.1",
-    "@testing-library/dom": "latest",
-    "@supabase/supabase-js": "latest",
-    "@testing-library/react": "latest",
-    "@jest/globals": "latest",
-    "@testing-library/jest-dom": "latest"
+    "@supabase/supabase-js": "^2.45.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.4.8",
+    "@jest/globals": "^29.7.0",
+    "@testing-library/dom": "^10.4.0"
   },
   "devDependencies": {
     "@types/node": "^22",
